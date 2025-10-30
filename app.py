@@ -3,6 +3,7 @@ from flask import Flask, render_template, request, flash
 import osmnx as ox
 import networkx as nx
 import folium
+from folium.plugins import MeasureControl, MiniMap, Fullscreen
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 from shapely.geometry import Point
@@ -17,13 +18,13 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-key")
 PLACE = "Kuala Lumpur, Malaysia"
 print("Building road graph for:", PLACE)
 
-# 原始经纬度图
+# 原始经纬度图（WGS84）
 G = ox.graph_from_place(PLACE, network_type="drive", simplify=True)
-G = ox.distance.add_edge_lengths(G)          # 给边添加 length（米）
+G = ox.distance.add_edge_lengths(G)          # 为原始图添加 length（米）
 
-# 投影到米制坐标的图
+# 投影（UTM/本地米制）
 Gp = ox.projection.project_graph(G)
-Gp = ox.distance.add_edge_lengths(Gp)        # 保底再算一次 length（米）
+Gp = ox.distance.add_edge_lengths(Gp)        # 为投影图再计算一次 length（米）
 
 # -----------------------------
 # 2) A* 启发函数（投影坐标，单位米）
@@ -34,64 +35,65 @@ def h(u, v):
     return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
 
 # -----------------------------
-# 3) 地理编码（带限速）
+# 3) 地理编码（别名映射 + 多候选 + 国家限定）
 # -----------------------------
 _geolocator = Nominatim(user_agent="llm-astar-kl")
-_geocode = RateLimiter(_geolocator.geocode, min_delay_seconds=1, swallow_exceptions=False)
+_geocode = RateLimiter(_geolocator.geocode, min_delay_seconds=1, swallow_exceptions=True)
 
-def _norm(q: str) -> str:
-    return (q or "").strip()
+ALIASES = {
+    # 英文常见
+    "klcc": "Petronas Twin Towers, Kuala Lumpur",
+    "petronas": "Petronas Twin Towers, Kuala Lumpur",
+    "upm": "Universiti Putra Malaysia, Serdang, Selangor",
+    "mid valley": "Mid Valley Megamall, Kuala Lumpur",
+    "bukit bintang": "Bukit Bintang, Kuala Lumpur",
+    "sunway": "Sunway Pyramid, Subang Jaya, Selangor",
+    "equine": "Equine Residences, Seri Kembangan, Selangor",
+    "equine residences": "Equine Residences, Seri Kembangan, Selangor",
+    # 中文别名（常用）
+    "双子塔": "Petronas Twin Towers, Kuala Lumpur",
+    "吉隆坡双子塔": "Petronas Twin Towers, Kuala Lumpur",
+    "武吉免登": "Bukit Bintang, Kuala Lumpur",
+    "双威广场": "Sunway Pyramid, Subang Jaya, Selangor",
+    "布城大学": "Universiti Putra Malaysia, Serdang, Selangor",
+}
 
-# 改进版：别名映射 + 多候选 + 限定国家为马来西亚（MY）
+def _norm(s: str) -> str:
+    return (s or "").strip()
+
 def geocode_place(q: str):
     q = _norm(q)
     if not q:
         return None
 
     low = q.lower()
+    # 1) 别名映射
+    if low in ALIASES:
+        q = ALIASES[low]
 
-    # 常见别名（可按需扩展）
-    alias = {
-        "klcc": "Petronas Twin Towers, Kuala Lumpur",
-        "upm": "Universiti Putra Malaysia, Serdang, Selangor",
-        "mid valley": "Mid Valley Megamall, Kuala Lumpur",
-        "bukit bintang": "Bukit Bintang, Kuala Lumpur",
-        "sunway": "Sunway Pyramid, Subang Jaya, Selangor",
-        "equine": "Equine Residences, Seri Kembangan, Selangor",
-        "equine residences": "Equine Residences, Seri Kembangan, Selangor",
-        "petronas": "Petronas Twin Towers, Kuala Lumpur",
-    }
-    if low in alias:
-        q = alias[low]
-
-    # 是否已包含国家/州信息
+    # 2) 候选组合（避免重复拼 KL/州名）
     has_my = any(k in low for k in ["malaysia", "selangor", "kuala lumpur"])
-
-    # 依次尝试的候选
-    candidates = []
-    candidates.append(q)  # 原样
+    candidates = [q]
     if not has_my:
-        candidates.append(f"{q}, Malaysia")
+        candidates += [f"{q}, Malaysia"]
     if "kuala lumpur" not in low:
-        candidates.append(f"{q}, Kuala Lumpur, Malaysia")
+        candidates += [f"{q}, Kuala Lumpur, Malaysia"]
     if "selangor" not in low:
-        candidates.append(f"{q}, Selangor, Malaysia")
+        candidates += [f'{q}, Selangor, Malaysia']
 
     # 去重保持顺序
-    seen = set()
-    seq = []
+    seen, seq = set(), []
     for c in candidates:
         key = c.lower().strip()
         if key not in seen:
             seen.add(key)
             seq.append(c)
 
-    # 逐个尝试；限定只在马来西亚搜
+    # 3) 逐个尝试，限定国家 MY
     for cand in seq:
         loc = _geocode(cand, country_codes="my", exactly_one=True)
         if loc:
             return loc
-
     return None
 
 # -----------------------------
@@ -113,12 +115,14 @@ def nearest_node_bruteforce(graph_proj, x_m, y_m):
     return nodes[idx]
 
 # -----------------------------
-# 5) 计算路线并生成地图
+# 5) 计算路线并生成地图（增强版可视化）
 # -----------------------------
 def compute_route(origin_name: str, dest_name: str):
     # 5.1 地理编码
     o = geocode_place(origin_name)
     d = geocode_place(dest_name)
+    print(f"[geocode] origin={origin_name!r} -> {o}")
+    print(f"[geocode] dest  ={dest_name!r} -> {d}")
     if not o or not d:
         return None, None, "Could not geocode one or both places."
 
@@ -129,22 +133,23 @@ def compute_route(origin_name: str, dest_name: str):
     o_pt_proj = ox.projection.project_geometry(Point(o_lng, o_lat), to_crs=Gp.graph["crs"])[0]
     d_pt_proj = ox.projection.project_geometry(Point(d_lng, d_lat), to_crs=Gp.graph["crs"])[0]
 
-    # 5.3 在投影图上找最近节点（NumPy 暴力法）
+    # 5.3 在投影图上找最近节点
     o_node = nearest_node_bruteforce(Gp, o_pt_proj.x, o_pt_proj.y)
     d_node = nearest_node_bruteforce(Gp, d_pt_proj.x, d_pt_proj.y)
 
     # 5.4 A* 最短路（在投影图上跑，权重 = length）
     try:
         path = nx.astar_path(Gp, o_node, d_node, heuristic=lambda u, v: h(u, v), weight="length")
+        print(f"[astar] path_len={len(path)}")
     except nx.NetworkXNoPath:
+        print("[astar] no path")
         return None, None, "No drivable route found."
 
     # 5.5 距离：逐边 length 累加（最稳妥）
     edge_lengths = ox.utils_graph.get_route_edge_attributes(Gp, path, "length")
     total_m = float(np.nansum(edge_lengths))
-
-    # 兜底：若异常（<=0 或 >1000km），用大圆距离按节点段落相加
     if total_m <= 0 or (total_m / 1000.0) > 1000:
+        # 兜底：用大圆距离按节点段相加
         tot = 0.0
         for i in range(len(path) - 1):
             n1, n2 = path[i], path[i + 1]
@@ -152,16 +157,44 @@ def compute_route(origin_name: str, dest_name: str):
             lat2, lon2 = G.nodes[n2]["y"], G.nodes[n2]["x"]
             tot += ox.distance.great_circle_vec(lat1, lon1, lat2, lon2)
         total_m = tot
-
     dist_km = round(total_m / 1000.0, 2)
+    print(f"[dist] {dist_km} km")
 
-    # 5.6 Folium 地图（画线用原始经纬度图 G 的坐标）
-    m = folium.Map(location=[o_lat, o_lng], zoom_start=12)
-    folium.Marker([o_lat, o_lng], tooltip="Origin", popup=origin_name).add_to(m)
-    folium.Marker([d_lat, d_lng], tooltip="Destination", popup=dest_name).add_to(m)
-    nodes_latlng = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in path]
-    folium.PolyLine(nodes_latlng, weight=6, opacity=0.8).add_to(m)
-    folium.FitBounds(nodes_latlng).add_to(m)
+    # 5.6 Folium 地图（增强款）
+    # 基础底图：CartoDB + 额外 OSM/卫星可切换
+    m = folium.Map(location=[(o_lat + d_lat) / 2.0, (o_lng + d_lng) / 2.0],
+                   zoom_start=12, tiles="cartodb positron")
+    folium.TileLayer("OpenStreetMap").add_to(m)
+    folium.TileLayer("Stamen Terrain").add_to(m)
+
+    # 起点/终点标记
+    folium.Marker(
+        [o_lat, o_lng],
+        tooltip="Start",
+        popup=folium.Popup(f"<b>Start</b><br>{origin_name}", max_width=300),
+        icon=folium.Icon(color="green", icon="play"),
+    ).add_to(m)
+
+    folium.Marker(
+        [d_lat, d_lng],
+        tooltip="Destination",
+        popup=folium.Popup(f"<b>Destination</b><br>{dest_name}", max_width=300),
+        icon=folium.Icon(color="red", icon="flag"),
+    ).add_to(m)
+
+    # 路线折线 + 里程弹窗
+    route_coords = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in path]
+    folium.PolyLine(
+        route_coords, weight=6, opacity=0.85, tooltip=f"{dist_km} km", color="#3465d9"
+    ).add_to(m)
+
+    # 自动聚焦到路线范围
+    m.fit_bounds(route_coords)
+
+    # 实用控件：测距 / 全屏 / 小地图
+    m.add_child(MeasureControl(position="topleft", primary_length_unit="kilometers"))
+    Fullscreen(position="topleft").add_to(m)
+    MiniMap(toggle_display=True, minimized=True).add_to(m)
 
     return dist_km, m._repr_html_(), None
 
