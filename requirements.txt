@@ -1,0 +1,5 @@
+flask==3.0.3
+osmnx==1.9.3
+networkx==3.4.2
+folium==0.17.0
+geopy==2.4.1

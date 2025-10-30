@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block content %}
+
+<section class="card">
+  <form method="post" id="route-form" class="form-grid" onsubmit="return handleSubmit()">
+    <div class="field">
+      <label>Point A</label>
+      <input name="origin" id="origin" placeholder="e.g., Universiti Putra Malaysia"
+             value="{{ origin_val|default('Universiti Putra Malaysia') }}" required />
+    </div>
+
+    <button type="button" class="btn ghost swap" id="swap-btn" title="Swap A↔B" aria-label="Swap A and B">↕</button>
+
+    <div class="field">
+      <label>Point B</label>
+      <input name="dest" id="dest" placeholder="e.g., KLCC"
+             value="{{ dest_val|default('KLCC') }}" required />
+    </div>
+
+    <div class="row">
+      <button type="submit" id="submit-btn" class="btn primary">Find Shortest Route (A*)</button>
+    </div>
+
+    <div class="chips" aria-label="Quick examples">
+      <span class="chip" data-a="Universiti Putra Malaysia" data-b="KLCC">UPM → KLCC</span>
+      <span class="chip" data-a="Mid Valley Megamall, Kuala Lumpur" data-b="Petronas Twin Towers, Kuala Lumpur">Mid Valley → KLCC</span>
+      <span class="chip" data-a="Sunway Pyramid, Subang Jaya" data-b="Bukit Bintang, Kuala Lumpur">Sunway → Bukit Bintang</span>
+      <span class="chip" data-a="Seri Kembangan, Selangor" data-b="KLCC, Kuala Lumpur">Seri Kembangan → KLCC</span>
+    </div>
+
+    <p class="hint">
+      Tip: 输入更具体的地名（含城市或州，如 <em>Seri Kembangan, Selangor</em>）更容易被定位。
+    </p>
+  </form>
+</section>
+
+{% if distance_km %}
+  <div class="result">
+    <h2>Shortest Driving Distance: {{ "%.2f"|format(distance_km) }} km</h2>
+  </div>
+{% endif %}
+
+<div class="map-container" id="map-container">
+  {% if map_html %}
+    {{ map_html|safe }}
+  {% else %}
+    <div class="map-placeholder">
+      <p>👋 输入起点与终点，然后点击上方按钮开始计算路线。</p>
+    </div>
+  {% endif %}
+</div>
+
+<div class="backdrop" id="backdrop" hidden>
+  <div class="spinner" aria-label="Loading"></div>
+  <p>Computing route…</p>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // 交换 A/B
+  document.getElementById('swap-btn').addEventListener('click', () => {
+    const a = document.getElementById('origin');
+    const b = document.getElementById('dest');
+    [a.value, b.value] = [b.value, a.value];
+    a.focus();
+  });
+
+  // 示例 chip 点击一键填充
+  document.querySelectorAll('.chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const a = document.getElementById('origin');
+      const b = document.getElementById('dest');
+      a.value = chip.dataset.a || a.value;
+      b.value = chip.dataset.b || b.value;
+      a.focus();
+    });
+  });
+
+  // 提交时防重复 + 简易加载遮罩
+  function handleSubmit() {
+    const btn = document.getElementById('submit-btn');
+    const bd = document.getElementById('backdrop');
+    btn.disabled = true;
+    btn.textContent = 'Working…';
+    bd.hidden = false;
+    return true; // 继续提交
+  }
+
+  // 回车直接提交
+  ['origin','dest'].forEach(id => {
+    document.getElementById(id).addEventListener('keydown', e => {
+      if (e.key === 'Enter') document.getElementById('route-form').requestSubmit();
+    });
+  });
+</script>
+{% endblock %}
